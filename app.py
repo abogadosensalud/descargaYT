@@ -6,7 +6,9 @@ from uuid import uuid4
 import glob
 
 app = Flask(__name__)
-CORS(app)
+
+app = Flask(__name__)
+CORS(app, resources={r"/download": {"origins": "*"}})
 
 # Carpeta temporal para descargas
 DOWNLOAD_FOLDER = '/tmp/downloads'
