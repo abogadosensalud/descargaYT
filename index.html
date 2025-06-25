@@ -1,0 +1,56 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Descargar de YouTube</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      padding: 2rem;
+    }
+    input, button, select {
+      padding: 0.5rem;
+      font-size: 1rem;
+      margin: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Descargar desde YouTube</h1>
+  <form id="form">
+    <input type="url" id="url" placeholder="Pega el enlace de YouTube aquí" required />
+    <select id="format">
+      <option value="mp4">Video (MP4)</option>
+      <option value="mp3">Audio (MP3)</option>
+    </select>
+    <button type="submit">Descargar</button>
+  </form>
+  <p id="message"></p>
+  <script>
+    const form = document.getElementById('form');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const url = document.getElementById('url').value;
+      const format = document.getElementById('format').value;
+      const message = document.getElementById('message');
+      message.textContent = 'Procesando...';
+
+      const response = await fetch('/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, format })
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        window.location.href = data.download_url;
+      } else {
+        message.textContent = 'Error: ' + data.error;
+      }
+    });
+  </script>
+</body>
+</html>
