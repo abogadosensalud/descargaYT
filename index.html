@@ -1,20 +1,34 @@
-<!-- index.html -->
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Descargar de YouTube</title>
+  <link rel="icon" href="data:,">
   <style>
     body {
       font-family: sans-serif;
       text-align: center;
       padding: 2rem;
+      background: #f9f9f9;
+    }
+    h1 {
+      margin-bottom: 1rem;
     }
     input, button, select {
       padding: 0.5rem;
       font-size: 1rem;
       margin: 0.5rem;
+      width: 300px;
+      max-width: 80%;
+    }
+    button {
+      cursor: pointer;
+    }
+    #message {
+      margin-top: 1rem;
+      font-weight: bold;
+      color: #333;
     }
   </style>
 </head>
@@ -29,7 +43,10 @@
     <button type="submit">Descargar</button>
   </form>
   <p id="message"></p>
+
   <script>
+    const BACKEND_URL = 'https://descargayt-hw7y.onrender.com'; // 🟡 CAMBIAR ESTO
+
     const form = document.getElementById('form');
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -38,17 +55,24 @@
       const message = document.getElementById('message');
       message.textContent = 'Procesando...';
 
-      const response = await fetch('/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, format })
-      });
+      try {
+        const response = await fetch(BACKEND_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, format })
+        });
 
-      const data = await response.json();
-      if (data.success) {
-        window.location.href = data.download_url;
-      } else {
-        message.textContent = 'Error: ' + data.error;
+        const data = await response.json();
+
+        if (data.success) {
+          message.textContent = 'Descargando...';
+          window.location.href = data.download_url;
+        } else {
+          message.textContent = 'Error: ' + data.error;
+        }
+      } catch (err) {
+        message.textContent = 'Error de conexión con el servidor.';
+        console.error(err);
       }
     });
   </script>
