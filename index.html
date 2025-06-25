@@ -6,73 +6,83 @@
   <title>Descargar de YouTube</title>
   <link rel="icon" href="data:,">
   <style>
-    body {
-      font-family: sans-serif;
-      text-align: center;
-      padding: 2rem;
-      background: #f9f9f9;
-    }
-    h1 {
-      margin-bottom: 1rem;
-    }
-    input, button, select {
-      padding: 0.5rem;
-      font-size: 1rem;
-      margin: 0.5rem;
-      width: 300px;
-      max-width: 80%;
-    }
-    button {
-      cursor: pointer;
-    }
-    #message {
-      margin-top: 1rem;
-      font-weight: bold;
-      color: #333;
-    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; padding: 2rem; background: #f9f9f9; color: #333; }
+    h1 { margin-bottom: 1rem; }
+    #container { max-width: 500px; margin: 0 auto; background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    input, button, select { display: block; width: 100%; box-sizing: border-box; padding: 0.75rem; font-size: 1rem; margin: 0.5rem 0; border: 1px solid #ccc; border-radius: 4px; }
+    button { cursor: pointer; background: #007bff; color: white; border: none; font-weight: bold; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
+    #message { margin-top: 1rem; font-weight: bold; min-height: 1.2em; }
+    .error { color: #d9534f; }
+    .success { color: #5cb85c; }
   </style>
 </head>
 <body>
-  <h1>Descargar desde YouTube</h1>
-  <form id="form">
-    <input type="url" id="url" placeholder="Pega el enlace de YouTube aquí" required />
-    <select id="format">
-      <option value="mp4">Video (MP4)</option>
-      <option value="mp3">Audio (MP3)</option>
-    </select>
-    <button type="submit">Descargar</button>
-  </form>
-  <p id="message"></p>
+  <div id="container">
+    <h1>Descargar desde YouTube</h1>
+    <form id="form">
+      <input type="url" id="url" placeholder="Pega el enlace de YouTube aquí" required />
+      <select id="format">
+        <option value="mp4">Video (MP4)</option>
+        <option value="mp3">Audio (MP3)</option>
+      </select>
+      <button type="submit" id="submit-btn">Descargar</button>
+    </form>
+    <p id="message"></p>
+  </div>
 
   <script>
-    const BACKEND_URL = 'https://descargayt-hw7y.onrender.com'; // 🟡 CAMBIAR ESTO
+    // **CORRECCIÓN CLAVE**: Asegúrate de que esta URL sea la de tu servicio en Render.
+    const BACKEND_URL = 'https://descargayt-hw7y.onrender.com';
 
     const form = document.getElementById('form');
+    const submitBtn = document.getElementById('submit-btn');
+    const message = document.getElementById('message');
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const url = document.getElementById('url').value;
       const format = document.getElementById('format').value;
-      const message = document.getElementById('message');
-      message.textContent = 'Procesando...';
+
+      // Deshabilitar botón y mostrar mensaje
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Procesando...';
+      message.textContent = 'Conectando con el servidor...';
+      message.className = '';
 
       try {
-        const response = await fetch(BACKEND_URL, {
+        // **CORRECCIÓN CLAVE**: Se añade '/download' al final de la URL.
+        const response = await fetch(`${BACKEND_URL}/download`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, format })
+          body: JSON.stringify({ url: url, format: format })
         });
 
         const data = await response.json();
 
-        if (data.success) {
-          message.textContent = 'Descargando...';
-          window.location.href = data.download_url;
+        if (response.ok && data.success) {
+          message.textContent = '¡Listo! La descarga comenzará en breve...';
+          message.className = 'success';
+
+          // **MEJORA**: Crear un enlace y hacer clic en él es más robusto que window.location.href
+          const link = document.createElement('a');
+          link.href = data.download_url;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          
         } else {
-          message.textContent = 'Error: ' + data.error;
+          message.textContent = 'Error: ' + (data.error || 'Respuesta inesperada del servidor.');
+          message.className = 'error';
         }
       } catch (err) {
-        message.textContent = 'Error de conexión con el servidor.';
-        console.error(err);
+        message.textContent = 'Error de conexión. Revisa la URL del backend o tu conexión a internet.';
+        message.className = 'error';
+        console.error('Error en el fetch:', err);
+      } finally {
+        // Habilitar el botón nuevamente
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Descargar';
       }
     });
   </script>
