@@ -3,24 +3,30 @@ from flask_cors import CORS
 import yt_dlp
 import os
 from uuid import uuid4
+import glob
 
 app = Flask(__name__)
 CORS(app)
+
+# Carpeta temporal para descargas
 DOWNLOAD_FOLDER = '/tmp/downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 @app.route('/download', methods=['POST'])
 def download():
-    data = request.json
+    data = request.get_json()
     url = data.get('url')
     fmt = data.get('format')
 
     if not url or fmt not in ['mp3', 'mp4']:
-        return jsonify({'success': False, 'error': 'Datos inválidos'}), 400
+        return jsonify({'success': False, 'error': 'Parámetros inválidos'}), 400
 
-    output_file = os.path.join(DOWNLOAD_FOLDER, f'{uuid4()}.%(ext)s')
+    # Nombre de archivo temporal único
+    filename_prefix = str(uuid4())
+    output_template = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.%(ext)s')
+
     ydl_opts = {
-        'outtmpl': output_file,
+        'outtmpl': output_template,
         'format': 'bestaudio/best' if fmt == 'mp3' else 'best',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
@@ -31,21 +37,32 @@ def download():
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.download([url])
-        real_path = output_file.replace('%(ext)s', 'mp3' if fmt == 'mp3' else 'mp4')
-        filename = os.path.basename(real_path)
+            ydl.download([url])
+        
+        # Buscar archivo generado (.mp3 o .mp4)
+        ext = 'mp3' if fmt == 'mp3' else 'mp4'
+        downloaded_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{ext}'))
+        if not downloaded_files:
+            return jsonify({'success': False, 'error': 'Archivo no encontrado'}), 500
+
+        final_file = os.path.basename(downloaded_files[0])
         return jsonify({
             'success': True,
-            'download_url': f'/file/{filename}'
+            'download_url': f'/file/{final_file}'
         })
+
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/file/<filename>')
 def serve_file(filename):
     path = os.path.join(DOWNLOAD_FOLDER, filename)
+    if not os.path.exists(path):
+        return 'Archivo no encontrado', 404
     return send_file(path, as_attachment=True)
 
+# 🟢 Esta línea es clave para que Render exponga el servidor correctamente
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 5000))
