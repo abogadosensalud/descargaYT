@@ -6,6 +6,7 @@ import yt_dlp
 import os
 from uuid import uuid4
 import glob
+import tempfile
 
 # Inicialización de la App
 app = Flask(__name__)
@@ -13,10 +14,16 @@ CORS(app)
 
 # --- CONFIGURACIÓN ---
 DOWNLOAD_FOLDER = '/tmp/downloads'
-# Ruta donde guardamos el archivo de cookies en Render
-COOKIE_FILE_PATH = '/etc/secrets/cookies.txt' 
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
+# --- COOKIES DESDE VARIABLE DE ENTORNO ---
+cookie_env = os.getenv('COOKIE_STRING')
+COOKIE_FILE_PATH = None
+
+if cookie_env:
+    COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), 'cookies.txt')
+    with open(COOKIE_FILE_PATH, 'w') as f:
+        f.write(cookie_env)
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -39,8 +46,8 @@ def download():
         'noplaylist': True,
     }
 
-    # **CORRECCIÓN CLAVE**: Añadir el archivo de cookies si existe
-    if os.path.exists(COOKIE_FILE_PATH):
+    # Añadir archivo de cookies si fue generado
+    if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
         ydl_opts['cookiefile'] = COOKIE_FILE_PATH
 
     if fmt == 'mp3':
@@ -50,20 +57,20 @@ def download():
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }]
-    else: # mp4
+    else:  # mp4
         ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        
+
         ext = 'mp3' if fmt == 'mp3' else 'mp4'
         downloaded_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{ext}'))
-        
+
         if not downloaded_files:
             all_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.*'))
             if not all_files:
-                 return jsonify({'success': False, 'error': 'Archivo no encontrado después de la descarga'}), 500
+                return jsonify({'success': False, 'error': 'Archivo no encontrado después de la descarga'}), 500
             downloaded_files = all_files
 
         final_filename = os.path.basename(downloaded_files[0])
@@ -75,16 +82,13 @@ def download():
         })
 
     except yt_dlp.utils.DownloadError as e:
-        # Esto capturará el error de "Sign in to confirm" y lo mostrará en el frontend.
         return jsonify({'success': False, 'error': str(e)}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': f'Error inesperado: {str(e)}'}), 500
-
 
 @app.route('/file/<path:filename>')
 def serve_file(filename):
     path = os.path.join(DOWNLOAD_FOLDER, filename)
     if not os.path.exists(path):
         return 'Archivo no encontrado', 404
-    
     return send_file(path, as_attachment=True)
