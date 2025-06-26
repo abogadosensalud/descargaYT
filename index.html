@@ -15,6 +15,18 @@
     #message { margin-top: 1rem; font-weight: bold; min-height: 1.2em; }
     .error { color: #d9534f; }
     .success { color: #5cb85c; }
+    .processing { color: #f0ad4e; }
+    
+    /* Barra de progreso */
+    .progress-container { width: 100%; height: 20px; background-color: #f0f0f0; border-radius: 10px; margin: 1rem 0; overflow: hidden; }
+    .progress-bar { height: 100%; background: linear-gradient(90deg, #007bff, #0056b3); width: 0%; transition: width 0.3s ease; animation: pulse 2s infinite; }
+    .progress-container.hidden { display: none; }
+    
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.7; }
+      100% { opacity: 1; }
+    }
   </style>
 </head>
 <body>
@@ -28,30 +40,40 @@
       </select>
       <button type="submit" id="submit-btn">Descargar</button>
     </form>
+    
+    <div id="progress-container" class="progress-container hidden">
+      <div id="progress-bar" class="progress-bar"></div>
+    </div>
+    
     <p id="message"></p>
   </div>
 
   <script>
-    // **CORRECCIÓN CLAVE**: Asegúrate de que esta URL sea la de tu servicio en Render.
     const BACKEND_URL = 'https://descargayt-hw7y.onrender.com';
 
     const form = document.getElementById('form');
     const submitBtn = document.getElementById('submit-btn');
     const message = document.getElementById('message');
+    const progressContainer = document.getElementById('progress-container');
+    const progressBar = document.getElementById('progress-bar');
+
+    // Keep-alive para evitar que el servidor se duerma
+    setInterval(() => {
+      fetch(`${BACKEND_URL}/health`).catch(() => {});
+    }, 5 * 60 * 1000); // Cada 5 minutos
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const url = document.getElementById('url').value;
       const format = document.getElementById('format').value;
 
-      // Deshabilitar botón y mostrar mensaje
+      // Iniciar descarga
       submitBtn.disabled = true;
       submitBtn.textContent = 'Procesando...';
-      message.textContent = 'Conectando con el servidor...';
-      message.className = '';
+      showProgress('Iniciando...');
 
       try {
-        // **CORRECCIÓN CLAVE**: Se añade '/download' al final de la URL.
+        // Iniciar descarga asíncrona
         const response = await fetch(`${BACKEND_URL}/download`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -61,30 +83,88 @@
         const data = await response.json();
 
         if (response.ok && data.success) {
-          message.textContent = '¡Listo! La descarga comenzará en breve...';
-          message.className = 'success';
-
-          // **MEJORA**: Crear un enlace y hacer clic en él es más robusto que window.location.href
-          const link = document.createElement('a');
-          link.href = data.download_url;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          
+          // Iniciar polling del estado
+          pollTaskStatus(data.task_id);
         } else {
-          message.textContent = 'Error: ' + (data.error || 'Respuesta inesperada del servidor.');
-          message.className = 'error';
+          showError('Error: ' + (data.error || 'Respuesta inesperada del servidor.'));
         }
       } catch (err) {
-        message.textContent = 'Error de conexión. Revisa la URL del backend o tu conexión a internet.';
-        message.className = 'error';
+        showError('Error de conexión. Verifica tu conexión a internet.');
         console.error('Error en el fetch:', err);
-      } finally {
-        // Habilitar el botón nuevamente
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Descargar';
       }
     });
+
+    function pollTaskStatus(taskId) {
+      const interval = setInterval(async () => {
+        try {
+          const response = await fetch(`${BACKEND_URL}/status/${taskId}`);
+          const data = await response.json();
+
+          if (data.state === 'PENDING') {
+            updateProgress(10, 'Esperando en cola...');
+          } else if (data.state === 'PROGRESS') {
+            updateProgress(50, data.status || 'Procesando...');
+          } else if (data.state === 'SUCCESS') {
+            clearInterval(interval);
+            updateProgress(100, '¡Descarga completada!');
+            
+            setTimeout(() => {
+              showSuccess('¡Listo! La descarga comenzará automáticamente...');
+              downloadFile(data.download_url);
+            }, 1000);
+            
+          } else if (data.state === 'FAILURE') {
+            clearInterval(interval);
+            showError('Error: ' + (data.error || 'Error desconocido'));
+          }
+        } catch (err) {
+          clearInterval(interval);
+          showError('Error al verificar el estado de la descarga');
+          console.error('Error en polling:', err);
+        }
+      }, 2000); // Verificar cada 2 segundos
+    }
+
+    function showProgress(status) {
+      progressContainer.classList.remove('hidden');
+      message.textContent = status;
+      message.className = 'processing';
+    }
+
+    function updateProgress(percentage, status) {
+      progressBar.style.width = percentage + '%';
+      message.textContent = status;
+      message.className = 'processing';
+    }
+
+    function showSuccess(text) {
+      progressContainer.classList.add('hidden');
+      message.textContent = text;
+      message.className = 'success';
+      resetForm();
+    }
+
+    function showError(text) {
+      progressContainer.classList.add('hidden');
+      message.textContent = text;
+      message.className = 'error';
+      resetForm();
+    }
+
+    function resetForm() {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Descargar';
+      progressBar.style.width = '0%';
+    }
+
+    function downloadFile(downloadUrl) {
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
   </script>
 </body>
 </html>
