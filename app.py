@@ -19,13 +19,41 @@ CORS(app)
 DOWNLOAD_FOLDER = '/tmp/downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# Configuración de Celery
+# Configuración mejorada de Celery
 app.config['CELERY_BROKER_URL'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 app.config['CELERY_RESULT_BACKEND'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
-# Inicializar Celery
-celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
-celery.conf.update(app.config)
+# Configuraciones adicionales para evitar errores de serialización
+app.config['CELERY_TASK_SERIALIZER'] = 'json'
+app.config['CELERY_RESULT_SERIALIZER'] = 'json'
+app.config['CELERY_ACCEPT_CONTENT'] = ['json']
+app.config['CELERY_TIMEZONE'] = 'UTC'
+app.config['CELERY_ENABLE_UTC'] = True
+
+# Configurar resultado backend para manejar excepciones correctamente
+app.config['CELERY_RESULT_EXPIRES'] = 3600  # 1 hora
+app.config['CELERY_TASK_RESULT_EXPIRES'] = 3600
+
+def make_celery(app):
+    """Factory para crear instancia de Celery con contexto de Flask"""
+    celery = Celery(
+        app.import_name,
+        backend=app.config['CELERY_RESULT_BACKEND'],
+        broker=app.config['CELERY_BROKER_URL']
+    )
+    celery.conf.update(app.config)
+
+    class ContextTask(celery.Task):
+        """Make celery tasks work with Flask app context."""
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return self.run(*args, **kwargs)
+
+    celery.Task = ContextTask
+    return celery
+
+# Inicializar Celery con contexto
+celery = make_celery(app)
 
 # Cliente Redis para estado de tareas
 redis_client = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
@@ -100,7 +128,16 @@ def download_video_task(self, url, fmt, filename_prefix):
         }
 
     except Exception as e:
-        self.update_state(state='FAILURE', meta={'error': str(e)})
+        # Mejorar el manejo de errores
+        error_msg = str(e)
+        self.update_state(
+            state='FAILURE', 
+            meta={
+                'error': error_msg,
+                'exc_type': type(e).__name__,
+                'exc_message': error_msg
+            }
+        )
         raise
 
 @app.route('/download', methods=['POST'])
@@ -129,33 +166,58 @@ def download():
 
 @app.route('/status/<task_id>')
 def task_status(task_id):
-    """Endpoint para verificar el estado de la descarga"""
-    task = download_video_task.AsyncResult(task_id)
-    
-    if task.state == 'PENDING':
-        response = {
-            'state': task.state,
-            'status': 'Tarea en cola...'
-        }
-    elif task.state == 'PROGRESS':
-        response = {
-            'state': task.state,
-            'status': task.info.get('status', 'Procesando...')
-        }
-    elif task.state == 'SUCCESS':
-        result = task.result
-        download_url = url_for('serve_file', filename=result['filename'], _external=True)
-        response = {
-            'state': task.state,
-            'download_url': download_url
-        }
-    else:  # FAILURE
-        response = {
-            'state': task.state,
-            'error': str(task.info.get('error', 'Error desconocido'))
-        }
-    
-    return jsonify(response)
+    """Endpoint para verificar el estado de la descarga con manejo robusto de errores"""
+    try:
+        # Usar celery.AsyncResult en lugar de la tarea específica
+        task = celery.AsyncResult(task_id)
+        
+        if task.state == 'PENDING':
+            response = {
+                'state': task.state,
+                'status': 'Tarea en cola...'
+            }
+        elif task.state == 'PROGRESS':
+            # Manejar casos donde task.info podría ser None
+            info = task.info or {}
+            response = {
+                'state': task.state,
+                'status': info.get('status', 'Procesando...')
+            }
+        elif task.state == 'SUCCESS':
+            result = task.result or {}
+            if isinstance(result, dict) and 'filename' in result:
+                download_url = url_for('serve_file', filename=result['filename'], _external=True)
+                response = {
+                    'state': task.state,
+                    'download_url': download_url
+                }
+            else:
+                response = {
+                    'state': 'FAILURE',
+                    'error': 'Resultado de tarea inválido'
+                }
+        else:  # FAILURE u otros estados
+            # Manejar información de error de manera más robusta
+            error_info = task.info or {}
+            if isinstance(error_info, dict):
+                error_msg = error_info.get('error', error_info.get('exc_message', 'Error desconocido'))
+            else:
+                error_msg = str(error_info) if error_info else 'Error desconocido'
+            
+            response = {
+                'state': task.state,
+                'error': error_msg
+            }
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        # Manejo de errores del propio endpoint
+        app.logger.error(f'Error en task_status para task_id {task_id}: {str(e)}')
+        return jsonify({
+            'state': 'ERROR',
+            'error': f'Error al consultar estado de la tarea: {str(e)}'
+        }), 500
 
 @app.route('/file/<path:filename>')
 def serve_file(filename):
@@ -167,7 +229,18 @@ def serve_file(filename):
 @app.route('/health')
 def health_check():
     """Endpoint para keep-alive"""
-    return jsonify({'status': 'healthy', 'timestamp': time.time()})
+    try:
+        # Verificar conexión a Redis
+        redis_client.ping()
+        redis_status = 'connected'
+    except:
+        redis_status = 'disconnected'
+    
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': time.time(),
+        'redis': redis_status
+    })
 
 # Limpieza de archivos antiguos al iniciar
 def cleanup_old_files():
