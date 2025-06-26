@@ -1,4 +1,4 @@
-# app.py
+# app.py (Versión con logging mejorado para cookies)
 
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
@@ -10,10 +10,16 @@ import tempfile
 from celery import Celery
 import redis
 import time
+import logging
 
 # Inicialización de la App
 app = Flask(__name__)
 CORS(app)
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+# Silenciar logs ruidosos de otras librerías si es necesario
+# logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 # --- CONFIGURACIÓN ---
 DOWNLOAD_FOLDER = '/tmp/downloads'
@@ -22,102 +28,103 @@ os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 # Configuración mejorada de Celery
 app.config['CELERY_BROKER_URL'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 app.config['CELERY_RESULT_BACKEND'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-
-# Configuraciones adicionales para evitar errores de serialización
 app.config['CELERY_TASK_SERIALIZER'] = 'json'
 app.config['CELERY_RESULT_SERIALIZER'] = 'json'
 app.config['CELERY_ACCEPT_CONTENT'] = ['json']
 app.config['CELERY_TIMEZONE'] = 'UTC'
 app.config['CELERY_ENABLE_UTC'] = True
-
-# Configurar resultado backend para manejar excepciones correctamente
-app.config['CELERY_RESULT_EXPIRES'] = 3600  # 1 hora
+app.config['CELERY_RESULT_EXPIRES'] = 3600
 app.config['CELERY_TASK_RESULT_EXPIRES'] = 3600
 
 def make_celery(app):
-    """Factory para crear instancia de Celery con contexto de Flask"""
     celery = Celery(
         app.import_name,
         backend=app.config['CELERY_RESULT_BACKEND'],
         broker=app.config['CELERY_BROKER_URL']
     )
     celery.conf.update(app.config)
-
     class ContextTask(celery.Task):
-        """Make celery tasks work with Flask app context."""
         def __call__(self, *args, **kwargs):
             with app.app_context():
                 return self.run(*args, **kwargs)
-
     celery.Task = ContextTask
     return celery
 
-# Inicializar Celery con contexto
 celery = make_celery(app)
-
-# Cliente Redis para estado de tareas
 redis_client = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
-# --- COOKIES ---
+# --- MANEJO DE COOKIES CON LOGGING MEJORADO ---
 cookie_env = os.getenv('COOKIE_STRING')
 COOKIE_FILE_PATH = None
 
 if cookie_env:
-    COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), 'cookies.txt')
-    with open(COOKIE_FILE_PATH, 'w') as f:
-        f.write(cookie_env)
+    # Usar un path consistente en el directorio temporal
+    COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), 'yt-cookies.txt')
+    try:
+        with open(COOKIE_FILE_PATH, 'w') as f:
+            f.write(cookie_env)
+        # Log para confirmar que el archivo se escribió
+        app.logger.info(f"Variable COOKIE_STRING encontrada. Archivo de cookies creado en: {COOKIE_FILE_PATH}")
+        app.logger.info(f"Tamaño del archivo de cookies: {os.path.getsize(COOKIE_FILE_PATH)} bytes.")
+    except Exception as e:
+        app.logger.error(f"Error al escribir el archivo de cookies en {COOKIE_FILE_PATH}: {e}", exc_info=True)
+        COOKIE_FILE_PATH = None # Anular si falla la escritura
+else:
+    app.logger.warning("Variable de entorno COOKIE_STRING no encontrada. Las descargas pueden fallar por restricciones de YouTube.")
 
 @celery.task(bind=True)
 def download_video_task(self, url, fmt, filename_prefix):
-    """Tarea asíncrona para descargar videos"""
+    """Tarea asíncrona para descargar videos con logging de cookies"""
     try:
-        # Actualizar estado: iniciando
         self.update_state(state='PROGRESS', meta={'status': 'Iniciando descarga...'})
         
         output_template = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.%(ext)s')
         
-        # Configuración optimizada para yt-dlp
         ydl_opts = {
             'outtmpl': output_template,
             'noplaylist': True,
             'no_warnings': True,
-            'quiet': True,  # Reduce logs
+            'quiet': True,
             'extract_flat': False,
-            'writethumbnail': False,  # No descargar thumbnails
-            'writeinfojson': False,   # No crear archivos JSON
+            'writethumbnail': False,
+            'writeinfojson': False,
         }
 
-        # Añadir cookies si existen
-        if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
-            ydl_opts['cookiefile'] = COOKIE_FILE_PATH
+        # Verificación del archivo de cookies dentro de la tarea
+        if COOKIE_FILE_PATH:
+            if os.path.exists(COOKIE_FILE_PATH):
+                ydl_opts['cookiefile'] = COOKIE_FILE_PATH
+                app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies: {COOKIE_FILE_PATH}")
+            else:
+                app.logger.warning(f"[Task {self.request.id}] El archivo de cookies {COOKIE_FILE_PATH} fue definido pero no se encontró en el sistema de archivos.")
+        else:
+            app.logger.info(f"[Task {self.request.id}] No se está usando un archivo de cookies.")
+
 
         if fmt == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '128',  # Reducido de 192 a 128 para mayor velocidad
+                'preferredquality': '128',
             }]
             self.update_state(state='PROGRESS', meta={'status': 'Descargando audio...'})
-        else:  # mp4
-            # Formato más eficiente para video
-            ydl_opts['format'] = 'best[height<=720]/best'  # Limitar calidad para velocidad
+        else:
+            ydl_opts['format'] = 'best[height<=720]/best'
             self.update_state(state='PROGRESS', meta={'status': 'Descargando video...'})
 
-        # Descargar
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
         self.update_state(state='PROGRESS', meta={'status': 'Procesando archivo...'})
 
-        # Buscar archivo descargado
         ext = 'mp3' if fmt == 'mp3' else 'mp4'
         downloaded_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{ext}'))
 
         if not downloaded_files:
             all_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.*'))
             if not all_files:
-                raise Exception('Archivo no encontrado después de la descarga')
+                raise Exception(f"Archivo no encontrado después de la descarga para el prefijo: {filename_prefix}")
             downloaded_files = all_files
 
         final_filename = os.path.basename(downloaded_files[0])
@@ -128,17 +135,17 @@ def download_video_task(self, url, fmt, filename_prefix):
         }
 
     except Exception as e:
-        # Mejorar el manejo de errores
+        app.logger.error(f"Error en la tarea {self.request.id}: {e}", exc_info=True)
         error_msg = str(e)
         self.update_state(
             state='FAILURE', 
             meta={
                 'error': error_msg,
                 'exc_type': type(e).__name__,
-                'exc_message': error_msg
             }
         )
-        raise
+        
+# --- El resto del código permanece igual ---
 
 @app.route('/download', methods=['POST'])
 def download():
@@ -152,10 +159,7 @@ def download():
     if not url or fmt not in ['mp3', 'mp4']:
         return jsonify({'success': False, 'error': 'Parámetros inválidos'}), 400
 
-    # Generar ID único para la tarea
     filename_prefix = str(uuid4())
-    
-    # Iniciar tarea asíncrona
     task = download_video_task.delay(url, fmt, filename_prefix)
     
     return jsonify({
@@ -166,58 +170,34 @@ def download():
 
 @app.route('/status/<task_id>')
 def task_status(task_id):
-    """Endpoint para verificar el estado de la descarga con manejo robusto de errores"""
     try:
-        # Usar celery.AsyncResult en lugar de la tarea específica
         task = celery.AsyncResult(task_id)
         
         if task.state == 'PENDING':
-            response = {
-                'state': task.state,
-                'status': 'Tarea en cola...'
-            }
+            response = {'state': task.state, 'status': 'Tarea en cola...'}
         elif task.state == 'PROGRESS':
-            # Manejar casos donde task.info podría ser None
             info = task.info or {}
-            response = {
-                'state': task.state,
-                'status': info.get('status', 'Procesando...')
-            }
+            response = {'state': task.state, 'status': info.get('status', 'Procesando...')}
         elif task.state == 'SUCCESS':
             result = task.result or {}
             if isinstance(result, dict) and 'filename' in result:
                 download_url = url_for('serve_file', filename=result['filename'], _external=True)
-                response = {
-                    'state': task.state,
-                    'download_url': download_url
-                }
+                response = {'state': task.state, 'download_url': download_url}
             else:
-                response = {
-                    'state': 'FAILURE',
-                    'error': 'Resultado de tarea inválido'
-                }
+                response = {'state': 'FAILURE', 'error': 'Resultado de tarea inválido o la tarea falló silenciosamente.'}
         else:  # FAILURE u otros estados
-            # Manejar información de error de manera más robusta
             error_info = task.info or {}
             if isinstance(error_info, dict):
-                error_msg = error_info.get('error', error_info.get('exc_message', 'Error desconocido'))
+                error_msg = error_info.get('error', 'Error desconocido en la tarea.')
             else:
-                error_msg = str(error_info) if error_info else 'Error desconocido'
-            
-            response = {
-                'state': task.state,
-                'error': error_msg
-            }
+                error_msg = str(error_info) if error_info else 'Error desconocido en la tarea.'
+            response = {'state': task.state, 'error': error_msg}
         
         return jsonify(response)
         
     except Exception as e:
-        # Manejo de errores del propio endpoint
-        app.logger.error(f'Error en task_status para task_id {task_id}: {str(e)}')
-        return jsonify({
-            'state': 'ERROR',
-            'error': f'Error al consultar estado de la tarea: {str(e)}'
-        }), 500
+        app.logger.error(f'Error en task_status para task_id {task_id}: {str(e)}', exc_info=True)
+        return jsonify({'state': 'ERROR', 'error': f'Error interno al consultar estado de la tarea.'}), 500
 
 @app.route('/file/<path:filename>')
 def serve_file(filename):
@@ -228,33 +208,24 @@ def serve_file(filename):
 
 @app.route('/health')
 def health_check():
-    """Endpoint para keep-alive"""
     try:
-        # Verificar conexión a Redis
         redis_client.ping()
         redis_status = 'connected'
     except:
         redis_status = 'disconnected'
-    
-    return jsonify({
-        'status': 'healthy', 
-        'timestamp': time.time(),
-        'redis': redis_status
-    })
+    return jsonify({'status': 'healthy', 'timestamp': time.time(), 'redis': redis_status})
 
-# Limpieza de archivos antiguos al iniciar
 def cleanup_old_files():
-    """Elimina archivos más antiguos de 1 hora"""
-    import time
     current_time = time.time()
     for filename in os.listdir(DOWNLOAD_FOLDER):
         filepath = os.path.join(DOWNLOAD_FOLDER, filename)
         if os.path.isfile(filepath):
-            if current_time - os.path.getctime(filepath) > 3600:  # 1 hora
+            if current_time - os.path.getctime(filepath) > 3600:
                 try:
                     os.remove(filepath)
-                except:
-                    pass
+                    app.logger.info(f"Limpiando archivo antiguo: {filepath}")
+                except Exception as e:
+                    app.logger.error(f"Error limpiando archivo {filepath}: {e}")
 
 if __name__ == '__main__':
     cleanup_old_files()
