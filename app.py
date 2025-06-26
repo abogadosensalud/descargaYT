@@ -80,9 +80,11 @@ if cookie_env:
 else:
     app.logger.warning("Variable de entorno COOKIE_STRING no encontrada. Las descargas pueden fallar por restricciones de YouTube.")
 
+# app.py (solo la función download_video_task)
+
 @celery.task(bind=True)
 def download_video_task(self, url, fmt, filename_prefix):
-    """Tarea asíncrona para descargar videos con logging de cookies"""
+    """Tarea asíncrona para descargar videos con logging y retorno mejorados"""
     try:
         self.update_state(state='PROGRESS', meta={'status': 'Iniciando descarga...'})
         
@@ -98,12 +100,9 @@ def download_video_task(self, url, fmt, filename_prefix):
             'writeinfojson': False,
         }
 
-        if COOKIE_FILE_PATH:
-            if os.path.exists(COOKIE_FILE_PATH):
-                ydl_opts['cookiefile'] = COOKIE_FILE_PATH
-                app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies: {COOKIE_FILE_PATH}")
-            else:
-                app.logger.warning(f"[Task {self.request.id}] El archivo de cookies {COOKIE_FILE_PATH} fue definido pero no se encontró en el sistema de archivos.")
+        if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
+            ydl_opts['cookiefile'] = COOKIE_FILE_PATH
+            app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies: {COOKIE_FILE_PATH}")
         else:
             app.logger.info(f"[Task {self.request.id}] No se está usando un archivo de cookies.")
 
@@ -132,13 +131,31 @@ def download_video_task(self, url, fmt, filename_prefix):
 
         final_filename = os.path.basename(downloaded_files[0])
         
-        return {'status': 'SUCCESS', 'filename': final_filename}
+        # --- CAMBIO 1: LOGGING ANTES DE RETORNAR ---
+        result_payload = {
+            'status': 'SUCCESS',
+            'filename': final_filename
+        }
+        app.logger.info(f"[Task {self.request.id}] Tarea completada exitosamente. Retornando: {result_payload}")
+        return result_payload
 
     except Exception as e:
         app.logger.error(f"Error en la tarea {self.request.id}: {e}", exc_info=True)
         error_msg = str(e)
-        self.update_state(state='FAILURE', meta={'error': error_msg, 'exc_type': type(e).__name__})
-
+        # Construimos el payload de error que se guardará en task.info
+        error_payload = {
+            'error': error_msg,
+            'exc_type': type(e).__name__,
+        }
+        self.update_state(
+            state='FAILURE', 
+            meta=error_payload
+        )
+        
+        # --- CAMBIO 2: RETORNO EXPLÍCITO EN CASO DE ERROR ---
+        # Esto hace que task.result contenga la información del error.
+        return error_payload
+        
 # --- El resto del código no cambia ---
 @app.route('/download', methods=['POST'])
 def download():
