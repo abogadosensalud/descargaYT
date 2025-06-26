@@ -1,0 +1,13 @@
+name: Keep Alive
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # Cada 10 minutos
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping server
+        run: |
+          curl -f https://descargayt-hw7y.onrender.com/health || exit 1
