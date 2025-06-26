@@ -82,9 +82,11 @@ else:
 
 # app.py (solo la función download_video_task)
 
-@celery.task(bind=True)
+# app.py (solo la función download_video_task)
+
+@celery.task(bind=True, throws=(Exception,))
 def download_video_task(self, url, fmt, filename_prefix):
-    """Tarea asíncrona para descargar videos con logging y retorno mejorados"""
+    """Tarea asíncrona para descargar videos con manejo de errores y búsqueda de archivos robusta."""
     try:
         self.update_state(state='PROGRESS', meta={'status': 'Iniciando descarga...'})
         
@@ -93,69 +95,77 @@ def download_video_task(self, url, fmt, filename_prefix):
         ydl_opts = {
             'outtmpl': output_template,
             'noplaylist': True,
-            'no_warnings': True,
             'quiet': True,
             'extract_flat': False,
             'writethumbnail': False,
             'writeinfojson': False,
+            # No ignorar errores de yt-dlp, queremos capturarlos
+            'ignoreerrors': False,
         }
 
         if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
             ydl_opts['cookiefile'] = COOKIE_FILE_PATH
             app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies: {COOKIE_FILE_PATH}")
-        else:
-            app.logger.info(f"[Task {self.request.id}] No se está usando un archivo de cookies.")
-
 
         if fmt == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '128'}]
-            self.update_state(state='PROGRESS', meta={'status': 'Descargando audio...'})
+            self.update_state(state='PROGRESS', meta={'status': 'Descargando y convirtiendo a MP3...'})
         else:
-            ydl_opts['format'] = 'best[height<=720]/best'
-            self.update_state(state='PROGRESS', meta={'status': 'Descargando video...'})
+            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            self.update_state(state='PROGRESS', meta={'status': 'Descargando video MP4...'})
 
+        # La descarga sucede aquí. Si yt-dlp o ffmpeg fallan, lanzarán una excepción.
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        self.update_state(state='PROGRESS', meta={'status': 'Procesando archivo...'})
-
-        ext = 'mp3' if fmt == 'mp3' else 'mp4'
-        downloaded_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{ext}'))
-
-        if not downloaded_files:
-            all_files = glob.glob(os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.*'))
-            if not all_files:
-                raise Exception(f"Archivo no encontrado después de la descarga para el prefijo: {filename_prefix}")
-            downloaded_files = all_files
-
-        final_filename = os.path.basename(downloaded_files[0])
+        self.update_state(state='PROGRESS', meta={'status': 'Buscando archivo final...'})
         
-        # --- CAMBIO 1: LOGGING ANTES DE RETORNAR ---
+        # --- LÓGICA DE BÚSQUEDA MEJORADA ---
+        # Esperar hasta 5 segundos a que aparezca el archivo final.
+        final_file_path = None
+        expected_ext = 'mp3' if fmt == 'mp3' else 'mp4'
+        
+        for _ in range(5): # Intentar por 5 segundos
+            # Buscar primero la extensión esperada
+            search_pattern = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{expected_ext}')
+            found_files = glob.glob(search_pattern)
+            if found_files:
+                final_file_path = found_files[0]
+                break
+            
+            # Si no, buscar cualquier cosa con el prefijo (rescate)
+            search_pattern_any = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.*')
+            found_files_any = glob.glob(search_pattern_any)
+            # Excluir archivos parciales de la búsqueda
+            found_files_any = [f for f in found_files_any if not f.endswith(('.part', '.ytdl'))]
+            if found_files_any:
+                final_file_path = found_files_any[0]
+                break
+            
+            time.sleep(1) # Esperar 1 segundo antes de reintentar
+
+        if not final_file_path:
+            # Si después de 5 segundos no hay nada, la tarea falla.
+            raise FileNotFoundError(f"El archivo final para el prefijo '{filename_prefix}' no se encontró después de la descarga.")
+
+        final_filename = os.path.basename(final_file_path)
+        
         result_payload = {
             'status': 'SUCCESS',
             'filename': final_filename
         }
-        app.logger.info(f"[Task {self.request.id}] Tarea completada exitosamente. Retornando: {result_payload}")
+        app.logger.info(f"[Task {self.request.id}] Tarea completada. Retornando: {result_payload}")
         return result_payload
 
     except Exception as e:
-        app.logger.error(f"Error en la tarea {self.request.id}: {e}", exc_info=True)
-        error_msg = str(e)
-        # Construimos el payload de error que se guardará en task.info
-        error_payload = {
-            'error': error_msg,
-            'exc_type': type(e).__name__,
-        }
-        self.update_state(
-            state='FAILURE', 
-            meta=error_payload
-        )
-        
-        # --- CAMBIO 2: RETORNO EXPLÍCITO EN CASO DE ERROR ---
-        # Esto hace que task.result contenga la información del error.
-        return error_payload
-        
+        # --- MANEJO DE EXCEPCIONES CORREGIDO ---
+        # Registra el error y permite que Celery lo maneje.
+        app.logger.error(f"[Task {self.request.id}] ¡FALLO! Error: {e}", exc_info=True)
+        # Al relanzar la excepción, Celery marcará la tarea como FAILURE
+        # y almacenará la información del error correctamente.
+        raise
+                
 # --- El resto del código no cambia ---
 @app.route('/download', methods=['POST'])
 def download():
