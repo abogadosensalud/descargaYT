@@ -86,9 +86,11 @@ else:
 
 # app.py (solo la función download_video_task)
 
+# app.py (solo la función download_video_task)
+
 @celery.task(bind=True, throws=(Exception,))
 def download_video_task(self, url, fmt, filename_prefix):
-    """Tarea asíncrona para descargar videos con selectores de formato flexibles."""
+    """Tarea asíncrona para descargar videos con la configuración más robusta."""
     try:
         self.update_state(state='PROGRESS', meta={'status': 'Iniciando descarga...'})
         
@@ -102,27 +104,20 @@ def download_video_task(self, url, fmt, filename_prefix):
             'writethumbnail': False,
             'writeinfojson': False,
             'ignoreerrors': False,
+            # --- CAMBIO CLAVE: FORZAR IPV4 ---
+            # Esto puede evitar ciertos bloqueos de YouTube relacionados con IPv6
+            'source_address': '0.0.0.0',
         }
 
         if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
             ydl_opts['cookiefile'] = COOKIE_FILE_PATH
             app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies: {COOKIE_FILE_PATH}")
         
-        # --- SELECTORES DE FORMATO FLEXIBLES ---
         if fmt == 'mp3':
-            # Pide el mejor audio disponible, sin importar el formato original.
-            # El post-procesador lo convertirá a MP3.
             ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '128',
-            }]
+            ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '128'}]
             self.update_state(state='PROGRESS', meta={'status': 'Descargando y convirtiendo a MP3...'})
-        else: # mp4
-            # Pide la mejor combinación de video y audio que no supere los 720p.
-            # 'merge_output_format' asegura que el resultado final sea un MP4, 
-            # incluso si descarga un video .webm y un audio .m4a por separado.
+        else:
             ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
             ydl_opts['merge_output_format'] = 'mp4'
             self.update_state(state='PROGRESS', meta={'status': 'Descargando y uniendo a MP4...'})
@@ -135,7 +130,7 @@ def download_video_task(self, url, fmt, filename_prefix):
         final_file_path = None
         expected_ext = 'mp3' if fmt == 'mp3' else 'mp4'
         
-        for _ in range(10): # Aumentamos la espera a 10s por si la unión tarda
+        for _ in range(10):
             search_pattern = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{expected_ext}')
             found_files = glob.glob(search_pattern)
             if found_files:
@@ -162,7 +157,7 @@ def download_video_task(self, url, fmt, filename_prefix):
     except Exception as e:
         app.logger.error(f"[Task {self.request.id}] ¡FALLO! Error: {e}", exc_info=True)
         raise
-                        
+                                
 # --- El resto del código no cambia ---
 @app.route('/download', methods=['POST'])
 def download():
