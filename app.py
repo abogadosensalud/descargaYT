@@ -1,4 +1,4 @@
-# app.py (Completo y corregido)
+# app.py
 
 from flask import Flask, request, jsonify, send_file, url_for
 from flask_cors import CORS
@@ -11,31 +11,32 @@ from celery import Celery
 import redis
 import time
 import logging
+import requests  # Importar requests para Telegram
 
 # Inicialización de la App
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE CORS MEJORADA ---
-# Lista de orígenes permitidos. Incluye tu dominio de GitHub Pages
-# y 'null' para pruebas locales (abrir el archivo HTML directamente).
 origins = [
     "https://abogadosensalud.github.io",
-    "http://localhost:5500",  # Si usas Live Server en VSCode para pruebas
-    "http://127.0.0.1:5500", # Alternativa para Live Server
-    "null" # Para cuando abres el index.html localmente como file://
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+    "null"
 ]
-
 CORS(app, resources={r"/*": {"origins": origins}})
-
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN GENERAL ---
 DOWNLOAD_FOLDER = '/tmp/downloads'
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
-# Configuración mejorada de Celery
+# --- CONFIGURACIÓN DE TELEGRAM ---
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+
+# --- CONFIGURACIÓN DE CELERY ---
 app.config['CELERY_BROKER_URL'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 app.config['CELERY_RESULT_BACKEND'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 app.config['CELERY_TASK_SERIALIZER'] = 'json'
@@ -63,35 +64,48 @@ def make_celery(app):
 celery = make_celery(app)
 redis_client = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
-# --- MANEJO DE COOKIES CON LOGGING MEJORADO ---
+# --- MANEJO DE COOKIES ---
 cookie_env = os.getenv('COOKIE_STRING')
 COOKIE_FILE_PATH = None
-
 if cookie_env:
     COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), 'yt-cookies.txt')
     try:
         with open(COOKIE_FILE_PATH, 'w') as f:
             f.write(cookie_env)
         app.logger.info(f"Variable COOKIE_STRING encontrada. Archivo de cookies creado en: {COOKIE_FILE_PATH}")
-        app.logger.info(f"Tamaño del archivo de cookies: {os.path.getsize(COOKIE_FILE_PATH)} bytes.")
     except Exception as e:
-        app.logger.error(f"Error al escribir el archivo de cookies en {COOKIE_FILE_PATH}: {e}", exc_info=True)
+        app.logger.error(f"Error al escribir el archivo de cookies: {e}", exc_info=True)
         COOKIE_FILE_PATH = None
 else:
-    app.logger.warning("Variable de entorno COOKIE_STRING no encontrada. Las descargas pueden fallar por restricciones de YouTube.")
+    app.logger.warning("Variable de entorno COOKIE_STRING no encontrada.")
 
-# app.py (solo la función download_video_task)
 
-# app.py (solo la función download_video_task)
+# --- FUNCIÓN DE AYUDA PARA TELEGRAM ---
+def send_telegram_message(message):
+    """Envía un mensaje a un chat de Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        app.logger.info("Token/ChatID de Telegram no configurados, omitiendo notificación.")
+        return
 
-# app.py (solo la función download_video_task)
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
+    
+    try:
+        requests.post(api_url, json=payload, timeout=5)
+        app.logger.info("Notificación de Telegram enviada.")
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"No se pudo enviar la notificación de Telegram: {e}")
 
-# app.py (solo la función download_video_task)
 
+# --- TAREA DE CELERY ---
 @celery.task(bind=True, throws=(Exception,))
 def download_video_task(self, url, fmt, filename_prefix):
-    """Tarea asíncrona para descargar videos con la configuración más robusta."""
+    """Tarea asíncrona para descargar videos con notificaciones de Telegram."""
     try:
+        # Notificación de inicio
+        message_start = f"▶️ *Nueva conversión iniciada!*\n\n🔗 *URL:* `{url}`\n💿 *Formato:* `{fmt.upper()}`"
+        send_telegram_message(message_start)
+
         self.update_state(state='PROGRESS', meta={'status': 'Iniciando descarga...'})
         
         output_template = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.%(ext)s')
@@ -104,14 +118,12 @@ def download_video_task(self, url, fmt, filename_prefix):
             'writethumbnail': False,
             'writeinfojson': False,
             'ignoreerrors': False,
-            # --- CAMBIO CLAVE: FORZAR IPV4 ---
-            # Esto puede evitar ciertos bloqueos de YouTube relacionados con IPv6
             'source_address': '0.0.0.0',
         }
 
         if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
             ydl_opts['cookiefile'] = COOKIE_FILE_PATH
-            app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies: {COOKIE_FILE_PATH}")
+            app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies.")
         
         if fmt == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
@@ -129,7 +141,6 @@ def download_video_task(self, url, fmt, filename_prefix):
         
         final_file_path = None
         expected_ext = 'mp3' if fmt == 'mp3' else 'mp4'
-        
         for _ in range(10):
             search_pattern = os.path.join(DOWNLOAD_FOLDER, f'{filename_prefix}.{expected_ext}')
             found_files = glob.glob(search_pattern)
@@ -142,23 +153,32 @@ def download_video_task(self, url, fmt, filename_prefix):
             if found_files_any:
                 final_file_path = found_files_any[0]
                 break
-            
             time.sleep(1)
 
         if not final_file_path:
-            raise FileNotFoundError(f"El archivo final para el prefijo '{filename_prefix}' no se encontró después de la descarga.")
+            raise FileNotFoundError(f"Archivo final para {filename_prefix} no encontrado.")
 
         final_filename = os.path.basename(final_file_path)
         
         result_payload = {'status': 'SUCCESS', 'filename': final_filename}
+        
+        # Notificación de éxito
+        message_success = f"✅ *¡Conversión completada!*\n\n📄 *Archivo:* `{final_filename}`\n🔗 *URL Original:* `{url}`"
+        send_telegram_message(message_success)
+
         app.logger.info(f"[Task {self.request.id}] Tarea completada. Retornando: {result_payload}")
         return result_payload
 
     except Exception as e:
+        # Notificación de error
+        error_msg_telegram = f"❌ *¡FALLO en la conversión!*\n\n🔗 *URL:* `{url}`\n\n*Error:* `{str(e)}`"
+        send_telegram_message(error_msg_telegram)
+        
         app.logger.error(f"[Task {self.request.id}] ¡FALLO! Error: {e}", exc_info=True)
         raise
+
                                 
-# --- El resto del código no cambia ---
+# --- RUTAS DE FLASK ---
 @app.route('/download', methods=['POST'])
 def download():
     data = request.get_json()
@@ -184,10 +204,10 @@ def task_status(task_id):
                 download_url = url_for('serve_file', filename=result['filename'], _external=True)
                 response = {'state': task.state, 'download_url': download_url}
             else: response = {'state': 'FAILURE', 'error': 'Resultado de tarea inválido o la tarea falló silenciosamente.'}
-        else:
-            error_info = task.info or {}
-            if isinstance(error_info, dict): error_msg = error_info.get('error', 'Error desconocido en la tarea.')
-            else: error_msg = str(error_info) if error_info else 'Error desconocido en la tarea.'
+        else: # FAILURE
+            # Para el estado FAILURE, task.info contiene la excepción.
+            # Lo convertimos a string para mostrarlo.
+            error_msg = str(task.info) if task.info else 'Error desconocido en la tarea.'
             response = {'state': task.state, 'error': error_msg}
         return jsonify(response)
     except Exception as e:
@@ -208,6 +228,7 @@ def health_check():
     except: redis_status = 'disconnected'
     return jsonify({'status': 'healthy', 'timestamp': time.time(), 'redis': redis_status})
 
+# --- FUNCIÓN DE LIMPIEZA ---
 def cleanup_old_files():
     current_time = time.time()
     for filename in os.listdir(DOWNLOAD_FOLDER):
@@ -220,6 +241,7 @@ def cleanup_old_files():
                 except Exception as e:
                     app.logger.error(f"Error limpiando archivo {filepath}: {e}")
 
+# --- PUNTO DE ENTRADA ---
 if __name__ == '__main__':
     cleanup_old_files()
     app.run(debug=False)
