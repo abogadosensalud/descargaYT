@@ -36,6 +36,12 @@ os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+# --- CONFIGURACIÓN DE CREDENCIALES DE YOUTUBE (NUEVO MÉTODO) ---
+YT_USER = os.getenv('YT_USER')
+YT_PASS = os.getenv('YT_PASS')
+if not YT_USER or not YT_PASS:
+    app.logger.warning("Variables de entorno YT_USER o YT_PASS no encontradas. La descarga de videos restringidos podría fallar.")
+
 # --- CONFIGURACIÓN DE CELERY ---
 app.config['CELERY_BROKER_URL'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 app.config['CELERY_RESULT_BACKEND'] = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
@@ -64,22 +70,6 @@ def make_celery(app):
 celery = make_celery(app)
 redis_client = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
-# --- MANEJO DE COOKIES ---
-cookie_env = os.getenv('COOKIE_STRING')
-COOKIE_FILE_PATH = None
-if cookie_env:
-    COOKIE_FILE_PATH = os.path.join(tempfile.gettempdir(), 'yt-cookies.txt')
-    try:
-        with open(COOKIE_FILE_PATH, 'w') as f:
-            f.write(cookie_env)
-        app.logger.info(f"Variable COOKIE_STRING encontrada. Archivo de cookies creado en: {COOKIE_FILE_PATH}")
-    except Exception as e:
-        app.logger.error(f"Error al escribir el archivo de cookies: {e}", exc_info=True)
-        COOKIE_FILE_PATH = None
-else:
-    app.logger.warning("Variable de entorno COOKIE_STRING no encontrada.")
-
-
 # --- FUNCIÓN DE AYUDA PARA TELEGRAM ---
 def send_telegram_message(message):
     """Envía un mensaje a un chat de Telegram."""
@@ -97,7 +87,7 @@ def send_telegram_message(message):
         app.logger.error(f"No se pudo enviar la notificación de Telegram: {e}")
 
 
-# --- TAREA DE CELERY ---
+# --- TAREA DE CELERY (MODIFICADA) ---
 @celery.task(bind=True, throws=(Exception,))
 def download_video_task(self, url, fmt, filename_prefix):
     """Tarea asíncrona para descargar videos con notificaciones de Telegram."""
@@ -121,9 +111,15 @@ def download_video_task(self, url, fmt, filename_prefix):
             'source_address': '0.0.0.0',
         }
 
-        if COOKIE_FILE_PATH and os.path.exists(COOKIE_FILE_PATH):
-            ydl_opts['cookiefile'] = COOKIE_FILE_PATH
-            app.logger.info(f"[Task {self.request.id}] Usando archivo de cookies.")
+        # *** INICIO DEL CAMBIO IMPORTANTE ***
+        # Usar usuario y contraseña de aplicación si están disponibles
+        if YT_USER and YT_PASS:
+            ydl_opts['username'] = YT_USER
+            ydl_opts['password'] = YT_PASS
+            app.logger.info(f"[Task {self.request.id}] Usando autenticación con usuario y contraseña.")
+        else:
+            app.logger.warning(f"[Task {self.request.id}] No se encontraron credenciales. Procediendo sin autenticación.")
+        # *** FIN DEL CAMBIO IMPORTANTE ***
         
         if fmt == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
@@ -205,8 +201,6 @@ def task_status(task_id):
                 response = {'state': task.state, 'download_url': download_url}
             else: response = {'state': 'FAILURE', 'error': 'Resultado de tarea inválido o la tarea falló silenciosamente.'}
         else: # FAILURE
-            # Para el estado FAILURE, task.info contiene la excepción.
-            # Lo convertimos a string para mostrarlo.
             error_msg = str(task.info) if task.info else 'Error desconocido en la tarea.'
             response = {'state': task.state, 'error': error_msg}
         return jsonify(response)
